@@ -1,0 +1,21 @@
+# Ignore sensitive LaTeX manuscript sources and raw data files
+*.tex
+*.csv
+*.pdf
+*.log
+*.aux
+*.out
+*.synctex.gz
+*.fls
+*.fdb_latexmk
+
+# Python bytecode & cache
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE & system directories
+.agents/
+.vscode/
+.idea/
+.system_generated/
