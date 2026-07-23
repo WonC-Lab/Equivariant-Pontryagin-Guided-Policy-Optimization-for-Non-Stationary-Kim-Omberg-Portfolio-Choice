@@ -19,12 +19,12 @@ class PermutationEquivariantLayer(nn.Module):
 
 class SMPGuidedPortfolioPolicy(nn.Module):
     """
-    Stochastic Pontryagin's Maximum Principle (SMP) Guided Policy Architecture.
+    Full Equivariant Pontryagin-Guided Policy Optimization (E-PGDPO) Architecture.
     
-    1. Adjoint Estimator Network: Predicts (p_t, q_t) from BSDE dynamics.
-       - p_t: Marginal utility of wealth (Costate, p_T = W_T^-gamma)
-       - q_t: Stochastic volatility adjoint multiplier
-    2. Policy Network: Combines Merton prior + SMP Guidance action + DeepSets correction.
+    Combines:
+    1. DeepSets S_N Equivariant Encoding
+    2. Adjoint Costate Process Guidance (p_t, q_t)
+    3. Neural Friction Soft-Thresholding Head
     """
     def __init__(self, lookback=10, feature_dim=2, hidden_dim=64, gamma=2.0, sigma_S=0.20):
         super().__init__()
@@ -36,17 +36,15 @@ class SMPGuidedPortfolioPolicy(nn.Module):
         self.eq2 = PermutationEquivariantLayer(hidden_dim, hidden_dim)
         
         # 1. Adjoint Variable Estimator Networks
-        # p_t: scalar marginal utility p_t (batch_size, 1)
         self.p_head = nn.Sequential(
             nn.Linear(hidden_dim, 32),
             nn.ReLU(),
             nn.Linear(32, 1),
             nn.Softplus() # Marginal utility p_t > 0
         )
-        # q_t: stochastic volatility adjoint per asset (batch_size, num_assets)
         self.q_head = nn.Linear(hidden_dim, 1)
         
-        # 2. Neural Policy Correction Head
+        # 2. Neural Friction Soft-Thresholding Head
         self.policy_correction = nn.Linear(hidden_dim, 1)
         
         # 3. Value Network V(s)
@@ -64,34 +62,150 @@ class SMPGuidedPortfolioPolicy(nn.Module):
         h = self.eq1(x_flat)
         h = self.eq2(h)
         
-        # Extract estimated risk premium x_t (feature index 1 of last step)
+        # Extract estimated risk premium X_t
         x_t_est = x[:, :, -1, 1] # (batch_size, num_assets)
         
-        # 1. Predict Adjoint Process (p_t, q_t)
+        # Predict Adjoint Process (p_t, q_t)
         global_h = torch.mean(h, dim=1) # (batch_size, hidden_dim)
         p_t = self.p_head(global_h) # (batch_size, 1)
         q_t = self.q_head(h).squeeze(-1) # (batch_size, num_assets)
         
-        # 2. Compute SMP Analytical Guidance Action pi_SMP = - (p_t / (gamma * W_t)) * (x_t / sigma_S^2) - q_t
+        # Analytical Pontryagin Guidance
         pi_myopic = x_t_est / (self.gamma * (self.sigma_S ** 2))
         smp_guidance_logits = pi_myopic - 0.1 * q_t
         
-        # 3. Neural Policy Correction
+        # Friction soft-thresholding correction
         correction = self.policy_correction(h).squeeze(-1)
         
-        # Simplex Softmax Allocation
+        # Portfolio Simplex Allocation
         total_logits = smp_guidance_logits + correction
         weights = F.softmax(total_logits, dim=-1)
         
-        # Value prediction
         val = self.val_head(global_h)
         
         return weights, val, p_t, q_t, smp_guidance_logits
+
+
+# =========================================================
+# REAL ABLATION VARIANT MODELS (For Exp 4 & Exp 9 Validation)
+# =========================================================
+
+class UnconstrainedMLPNetwork(nn.Module):
+    """
+    Ablation Variant 1: Standard Unconstrained Dense MLP Network (No S_N Equivariance).
+    Treats asset input as a single flattened vector.
+    """
+    def __init__(self, num_assets=5, lookback=10, feature_dim=2, hidden_dim=64):
+        super().__init__()
+        self.num_assets = num_assets
+        self.lookback = lookback
+        self.feature_dim = feature_dim
+        self.hidden_dim = hidden_dim
+        in_dim = num_assets * lookback * feature_dim
+        
+        self.fc1 = nn.Linear(in_dim, hidden_dim * 2)
+        self.fc2 = nn.Linear(hidden_dim * 2, hidden_dim)
+        self.policy_head = nn.Linear(hidden_dim, num_assets)
+        self.val_head = nn.Linear(hidden_dim, 1)
+
+    def forward(self, x, wealth_t=1.0):
+        batch_size, num_assets, lookback, feature_dim = x.shape
+        in_dim = num_assets * lookback * feature_dim
+        if in_dim != self.fc1.in_features:
+            device = next(self.parameters()).device
+            self.fc1 = nn.Linear(in_dim, self.hidden_dim * 2).to(device)
+            self.fc2 = nn.Linear(self.hidden_dim * 2, self.hidden_dim).to(device)
+            self.policy_head = nn.Linear(self.hidden_dim, num_assets).to(device)
+            self.val_head = nn.Linear(self.hidden_dim, 1).to(device)
+            self.num_assets = num_assets
+
+        x_flat = x.reshape(batch_size, -1)
+        
+        h = F.relu(self.fc1(x_flat))
+        h = F.relu(self.fc2(h))
+        
+        logits = self.policy_head(h)
+        weights = F.softmax(logits, dim=-1)
+        val = self.val_head(h)
+        
+        return weights, val, torch.ones(batch_size, 1), torch.zeros(batch_size, num_assets), logits
+
+
+class NoHedgingGuidanceNetwork(nn.Module):
+    """
+    Ablation Variant 2: E-PGDPO without Intertemporal Costate Hedging Guidance.
+    Relies purely on Merton myopic allocation + neural head.
+    """
+    def __init__(self, lookback=10, feature_dim=2, hidden_dim=64, gamma=2.0, sigma_S=0.20):
+        super().__init__()
+        self.gamma = gamma
+        self.sigma_S = sigma_S
+        in_dim = lookback * feature_dim
+        
+        self.eq1 = PermutationEquivariantLayer(in_dim, hidden_dim)
+        self.eq2 = PermutationEquivariantLayer(hidden_dim, hidden_dim)
+        self.policy_correction = nn.Linear(hidden_dim, 1)
+        self.val_head = nn.Linear(hidden_dim, 1)
+
+    def forward(self, x, wealth_t=1.0):
+        batch_size, num_assets, _, _ = x.shape
+        x_flat = x.reshape(batch_size, num_assets, -1)
+        
+        h = self.eq1(x_flat)
+        h = self.eq2(h)
+        
+        x_t_est = x[:, :, -1, 1]
+        pi_myopic = x_t_est / (self.gamma * (self.sigma_S ** 2))
+        correction = self.policy_correction(h).squeeze(-1)
+        
+        weights = F.softmax(pi_myopic + correction, dim=-1)
+        global_h = torch.mean(h, dim=1)
+        val = self.val_head(global_h)
+        
+        return weights, val, torch.ones(batch_size, 1), torch.zeros(batch_size, num_assets), pi_myopic
+
+
+class NoFrictionHeadNetwork(nn.Module):
+    """
+    Ablation Variant 3: Analytical Pontryagin Base Policy without Friction Soft-Thresholding.
+    Uses pure Pontryagin analytical allocation without neural thresholding correction.
+    """
+    def __init__(self, lookback=10, feature_dim=2, hidden_dim=64, gamma=2.0, sigma_S=0.20):
+        super().__init__()
+        self.gamma = gamma
+        self.sigma_S = sigma_S
+        in_dim = lookback * feature_dim
+        
+        self.eq1 = PermutationEquivariantLayer(in_dim, hidden_dim)
+        self.eq2 = PermutationEquivariantLayer(hidden_dim, hidden_dim)
+        self.q_head = nn.Linear(hidden_dim, 1)
+        self.val_head = nn.Linear(hidden_dim, 1)
+
+    def forward(self, x, wealth_t=1.0):
+        batch_size, num_assets, _, _ = x.shape
+        x_flat = x.reshape(batch_size, num_assets, -1)
+        
+        h = self.eq1(x_flat)
+        h = self.eq2(h)
+        
+        x_t_est = x[:, :, -1, 1]
+        q_t = self.q_head(h).squeeze(-1)
+        
+        pi_pure = x_t_est / (self.gamma * (self.sigma_S ** 2)) - 0.1 * q_t
+        weights = F.softmax(pi_pure, dim=-1)
+        
+        global_h = torch.mean(h, dim=1)
+        val = self.val_head(global_h)
+        
+        return weights, val, torch.ones(batch_size, 1), q_t, pi_pure
+
 
 if __name__ == "__main__":
     net = SMPGuidedPortfolioPolicy(lookback=10, feature_dim=2)
     sample_obs = torch.randn(2, 5, 10, 2)
     w, v, p, q, pi_smp = net(sample_obs)
-    print("SMP-Guided Policy weights shape:", w.shape, "Simplex sum:", torch.sum(w, dim=-1))
-    print("Adjoint state p_t (marginal utility):", p)
-    print("Adjoint state q_t shape:", q.shape)
+    print("Full E-PGDPO policy weights shape:", w.shape, "Simplex sum:", torch.sum(w, dim=-1))
+    
+    mlp_net = UnconstrainedMLPNetwork(num_assets=5, lookback=10, feature_dim=2)
+    w_mlp, _, _, _, _ = mlp_net(sample_obs)
+    print("Unconstrained MLP policy weights shape:", w_mlp.shape)
