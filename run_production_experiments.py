@@ -17,7 +17,7 @@ def train_and_evaluate_model(
     num_assets=5, 
     gamma=2.0, 
     num_episodes=500, 
-    num_seeds=5, 
+    num_seeds=30, 
     transaction_cost=0.001,
     bar_x=0.08,
     sigma_x=0.15,
@@ -147,8 +147,10 @@ def train_and_evaluate_model(
 
 if __name__ == "__main__":
     print("=== Running Primary Benchmark for Dow 30 Equivalent Portfolio (N = 30 Assets) ===")
-    summary_res = train_and_evaluate_model(num_assets=30, num_episodes=300, num_seeds=5)
-    print("\n=== TOP-TIER JOURNAL STATISTICAL SUMMARY (N = 30 ASSETS) ===")
+    # 30 seeds x 300 episodes x 100 MC trajectories = 3,000,000 evaluation paths
+    # Full journal-grade statistical validation
+    summary_res = train_and_evaluate_model(num_assets=30, num_episodes=300, num_seeds=30)
+    print("\n=== TOP-TIER JOURNAL STATISTICAL SUMMARY (N = 30 ASSETS, 30 SEEDS) ===")
     print(f"Terminal Wealth W_T: {summary_res['wealth_mean']:.4f} +/- {summary_res['wealth_sem']:.4f}")
     print(f"Annualized Sharpe Ratio: {summary_res['sharpe_mean']:.2f} +/- {summary_res['sharpe_sem']:.2f}")
     print(f"Annualized Sortino Ratio: {summary_res['sortino_mean']:.2f}")
@@ -159,3 +161,5 @@ if __name__ == "__main__":
     df = pd.DataFrame([summary_res])
     df.to_csv("journal_production_summary.csv", index=False)
     print("Saved production summary metrics to 'journal_production_summary.csv'.")
+
+

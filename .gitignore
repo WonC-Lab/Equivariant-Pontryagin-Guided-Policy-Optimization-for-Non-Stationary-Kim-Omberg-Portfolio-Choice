@@ -1,7 +1,4 @@
-# Ignore sensitive LaTeX manuscript sources and raw data files
-*.tex
-*.csv
-*.pdf
+# Temporary LaTeX build files
 *.log
 *.aux
 *.out

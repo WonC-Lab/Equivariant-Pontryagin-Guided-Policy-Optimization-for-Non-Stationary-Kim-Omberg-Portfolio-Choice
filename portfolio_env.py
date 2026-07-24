@@ -37,12 +37,19 @@ class EMKOPortfolioEnv:
         self.r = risk_free_rate
         
         # Kim & Omberg OU Risk Premium Parameters
+        # bar_x may be a scalar (same for all assets) or a 1-D array (per-asset)
         self.kappa = kappa
-        self.bar_x = bar_x
+        if np.isscalar(bar_x):
+            self.bar_x = np.full(num_assets, bar_x, dtype=np.float64)
+        else:
+            self.bar_x = np.asarray(bar_x, dtype=np.float64)
+            assert len(self.bar_x) == num_assets, \
+                f"bar_x length {len(self.bar_x)} != num_assets {num_assets}"
         self.sigma_x = sigma_x
         self.sigma_S = sigma_S
         self.rho = rho
         
+        self.seed_val = seed
         self.np_random = np.random.RandomState(seed)
         
         # Environment state variables
@@ -59,7 +66,8 @@ class EMKOPortfolioEnv:
         self.current_step = 0
         self.wealth = 1.0
         self.weights = np.ones(self.num_assets) / self.num_assets
-        self.x_t = self.np_random.normal(self.bar_x, 0.02, size=self.num_assets)
+        # Initialize x_t near its per-asset long-run mean
+        self.x_t = self.np_random.normal(0, 0.02, size=self.num_assets) + self.bar_x
         
         # Warm-up history
         self.price_history = [np.ones(self.num_assets)]
@@ -77,7 +85,7 @@ class EMKOPortfolioEnv:
         dW_x_uncorr = self.np_random.normal(0, np.sqrt(self.dt), size=self.num_assets)
         dW_x = self.rho * dW_S + np.sqrt(1 - self.rho**2) * dW_x_uncorr
         
-        # OU process update for risk premium x_t
+        # OU process update for risk premium x_t (per-asset bar_x)
         dx = self.kappa * (self.bar_x - self.x_t) * self.dt + self.sigma_x * dW_x
         self.x_t = self.x_t + dx
         
@@ -93,8 +101,8 @@ class EMKOPortfolioEnv:
     def _get_observation(self):
         """
         Returns (num_assets, lookback, features).
-        Features per asset: [historical_return, estimated_risk_premium_x_t, volatility]
-        Permutation-equivariant structure for $S_N$ group.
+        Features per asset: [historical_return, stochastic_risk_premium_x_t]
+        Permutation-equivariant state tensor structure for $S_N$ group.
         """
         recent_prices = np.array(self.price_history[-self.lookback-1:])
         returns = (recent_prices[1:] - recent_prices[:-1]) / recent_prices[:-1] # (lookback, N)
@@ -151,12 +159,14 @@ class EMKOPortfolioEnv:
 
     def get_kim_omberg_analytical_action(self, tau=1.0):
         """
-        Computes exact closed-form Kim & Omberg (1996) analytical action:
-        pi*_KO = Myopic (x / (gamma * sigma_S^2)) + Hedging correction
+        Computes exact closed-form Kim & Omberg (1996) analytical action per asset:
+        pi*_KO = Myopic (x_t / (gamma * sigma_S^2)) + Hedging correction
+        Works correctly for heterogeneous per-asset bar_x.
         """
         myopic_demand = self.x_t / (self.gamma * (self.sigma_S ** 2))
-        # Simplistic analytical approximation for intertemporal hedging demand
-        hedging_demand = (self.rho * self.sigma_x / self.sigma_S) * (self.x_t - self.bar_x) * tau / self.gamma
+        # Per-asset intertemporal hedging demand
+        hedging_demand = (self.rho * self.sigma_x / self.sigma_S) * (
+            self.x_t - self.bar_x) * tau / self.gamma
         pi_ko = myopic_demand + hedging_demand
         pi_ko = np.maximum(pi_ko, 0.0)
         if np.sum(pi_ko) > 0:
